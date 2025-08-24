@@ -38,6 +38,7 @@ The application integrates Plotly for interactive data visualizations, enabling 
 - **Pandas**: Data manipulation and analysis for processing proposal and payment data
 - **Plotly Express/Graph Objects**: Interactive data visualization and charting
 - **Requests**: HTTP client library for API communications
+ - **ReportLab**: Required to export reports to PDF format. Install with `pip install reportlab` or add to your project's dependencies (e.g., `pyproject.toml` or `requirements.txt`).
 
 ### Blockchain Networks
 - **Osmosis**: Cosmos-based DEX network for DeFi proposals

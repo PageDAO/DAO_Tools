@@ -1,11 +1,24 @@
 [project]
-name = "repl-nix-workspace"
+name = "dao-ledger"
 version = "0.1.0"
-description = "Add your description here"
+description = "Streamlit application to generate DAO accounting reports from proposal data."
+readme = "readme.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [ { name = "PageDAO", email = "ops@pagedao.org" } ]
+
 dependencies = [
-    "pandas>=2.3.2",
-    "plotly>=6.3.0",
-    "requests>=2.32.5",
-    "streamlit>=1.48.1",
+  "pandas>=2.3.2",
+  "plotly>=6.3.0",
+  "requests>=2.32.5",
+  "streamlit>=1.48.1",
+  "reportlab>=4.4.3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/PageDAO/DAO_Tools"
+Documentation = "https://github.com/PageDAO/DAO_Tools#readme"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"

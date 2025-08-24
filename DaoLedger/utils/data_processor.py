@@ -25,6 +25,11 @@ class DataProcessor:
             DataFrame with processed payment information
         """
         all_payments = []
+        diagnostics = {
+            'subunits': {},
+            'total_messages_scanned': 0,
+            'total_payments_extracted': 0
+        }
         
         for subunit_name, data in proposal_data.items():
             if 'error' in data:
@@ -36,8 +41,27 @@ class DataProcessor:
             for proposal in proposals:
                 payments = self.extract_payments_from_proposal(proposal, subunit_name, subunit_address)
                 all_payments.extend(payments)
+                # Count messages scanned in this proposal for diagnostics
+                try:
+                    proposal_obj = proposal.get('proposal') if isinstance(proposal, dict) and 'proposal' in proposal else proposal
+                    msgs = []
+                    if isinstance(proposal_obj, dict):
+                        msgs = proposal_obj.get('msgs') or proposal_obj.get('messages') or []
+                    if not msgs and isinstance(proposal, dict):
+                        msgs = proposal.get('msgs') or proposal.get('messages') or []
+                    if isinstance(msgs, dict):
+                        msgs = [msgs]
+                    diagnostics['total_messages_scanned'] += len(msgs) if isinstance(msgs, list) else 0
+                except Exception:
+                    pass
         
         if not all_payments:
+            # Save diagnostics to session state for UI inspection
+            try:
+                diagnostics['total_payments_extracted'] = 0
+                st.session_state['processing_diagnostics'] = diagnostics
+            except Exception:
+                pass
             return pd.DataFrame()
         
         df = pd.DataFrame(all_payments)
@@ -60,12 +84,12 @@ class DataProcessor:
         df['Amount Category'] = df.apply(self._categorize_amount, axis=1)
         df['Recipient Type'] = df['Recipient'].apply(self._classify_recipient)
 
-        # Deduplicate based on key fields (excluding fields that may differ for same payment)
-        dedup_fields = [
-            'Proposal ID', 'Proposal Date', 'Sub-unit', 'Recipient', 'Amount (uosmo)', 'Denom', 'Message Type', 'Contract Address'
-        ]
-        if all(field in df.columns for field in dedup_fields):
-            df = df.drop_duplicates(subset=dedup_fields, keep='first').reset_index(drop=True)
+        # Save diagnostics: total payments extracted
+        try:
+            diagnostics['total_payments_extracted'] = len(df)
+            st.session_state['processing_diagnostics'] = diagnostics
+        except Exception:
+            pass
         
         return df
     
@@ -82,43 +106,71 @@ class DataProcessor:
             List of payment dictionaries
         """
         payments = []
-        
+
         try:
-            proposal_id = proposal.get('id', 'Unknown')
-            proposal_obj = proposal.get('proposal', {})
-            
-            # Extract proposal text content
-            proposal_title = proposal_obj.get('title', '')
-            proposal_description = proposal_obj.get('description', '')
+            # Try several common keys for proposal id
+            proposal_id = proposal.get('id') or proposal.get('proposal_id') or proposal.get('proposalId') or 'Unknown'
+
+            # Proposal payload may be nested under 'proposal' or be the object itself
+            if isinstance(proposal.get('proposal'), dict):
+                proposal_obj = proposal.get('proposal')
+            else:
+                proposal_obj = proposal
+
+            # Extract proposal text content if present
+            proposal_title = proposal_obj.get('title', '') if isinstance(proposal_obj, dict) else ''
+            proposal_description = proposal_obj.get('description', '') if isinstance(proposal_obj, dict) else ''
             proposal_text = f"{proposal_title}\n{proposal_description}".strip()
-            
-            # Extract proposal date for pricing lookup
+
+            # Extract proposal date for pricing lookup (some APIs put date at top-level or inside proposal)
             proposal_date = self._extract_proposal_date(proposal)
-            
-            msgs = proposal_obj.get('msgs', [])
-            
+
+            # Support multiple possible message keys: 'msgs', 'messages', 'msgs' inside nested fields
+            msgs = []
+            if isinstance(proposal_obj, dict):
+                msgs = proposal_obj.get('msgs') or proposal_obj.get('messages') or proposal_obj.get('msgs', [])
+            # Fallback to top-level
+            if not msgs and isinstance(proposal, dict):
+                msgs = proposal.get('msgs') or proposal.get('messages') or []
+
+            # Ensure msgs is a list
+            if isinstance(msgs, dict):
+                msgs = [msgs]
+            if not isinstance(msgs, list):
+                msgs = []
+
+            # Iterate messages and dispatch to processors
             for msg in msgs:
-                # Handle different message types
-                if 'stargate' in msg:
-                    stargate_payments = self.process_stargate_message(msg['stargate'], proposal_id, subunit_name, subunit_address, proposal_text, proposal_date)
-                    payments.extend(stargate_payments)
-                elif 'bank' in msg:
-                    bank_payments = self.process_bank_message(msg['bank'], proposal_id, subunit_name, subunit_address, proposal_text, proposal_date)
-                    payments.extend(bank_payments)
-                elif 'wasm' in msg:
-                    wasm_payments = self.process_wasm_message(msg['wasm'], proposal_id, subunit_name, subunit_address, proposal_text, proposal_date)
-                    payments.extend(wasm_payments)
+                if not isinstance(msg, dict):
+                    continue
+                # Some APIs wrap message under 'msg' key
+                inner = None
+                # If message already formatted like {'wasm': {...}}, use it directly
+                if any(k in msg for k in ['wasm', 'bank', 'stargate']):
+                    inner = msg
                 else:
-                    # Try to extract any payment-like information from other message types
-                    other_payments = self.process_other_message(msg, proposal_id, subunit_name, subunit_address, proposal_text, proposal_date)
-                    payments.extend(other_payments)
-                    
+                    # Try common wrappers
+                    inner = msg.get('msg') or msg.get('value') or msg
+
+                # Dispatch by detected keys
+                if isinstance(inner, dict) and 'stargate' in inner:
+                    payments.extend(self.process_stargate_message(inner['stargate'], proposal_id, subunit_name, subunit_address, proposal_text, proposal_date, proposal_title=proposal_title))
+                elif isinstance(inner, dict) and 'bank' in inner:
+                    payments.extend(self.process_bank_message(inner['bank'], proposal_id, subunit_name, subunit_address, proposal_text, proposal_date, proposal_title=proposal_title))
+                elif isinstance(inner, dict) and 'wasm' in inner:
+                    payments.extend(self.process_wasm_message(inner['wasm'], proposal_id, subunit_name, subunit_address, proposal_text, proposal_date, proposal_title=proposal_title))
+                else:
+                    # Try generic extraction
+                    payments.extend(self.process_other_message(inner if isinstance(inner, dict) else msg, proposal_id, subunit_name, subunit_address, proposal_text, proposal_date, proposal_title=proposal_title))
+
         except Exception as e:
-            st.warning(f"Error processing proposal {proposal.get('id', 'Unknown')}: {str(e)}")
-        
+            # Use safer warning; avoid crashing the whole run
+            if st.session_state.get('debug', False):
+                st.warning(f"Error processing proposal {proposal_id}: {str(e)}")
+
         return payments
     
-    def process_stargate_message(self, stargate_msg: Dict[str, Any], proposal_id: Any, subunit_name: str, subunit_address: str, proposal_text: str = '', proposal_date: str = '') -> List[Dict[str, Any]]:
+    def process_stargate_message(self, stargate_msg: Dict[str, Any], proposal_id: Any, subunit_name: str, subunit_address: str, proposal_text: str = '', proposal_date: str = '', proposal_title: str = '') -> List[Dict[str, Any]]:
         """Process stargate messages to extract payment information"""
         payments = []
         
@@ -145,6 +197,7 @@ class DataProcessor:
                             if addr != subunit_address:  # Don't include the source address
                                 payments.append({
                                     'Proposal ID': proposal_id,
+                                    'Proposal Title': proposal_title,
                                     'Proposal Text': proposal_text,
                                     'Proposal Date': proposal_date,
                                     'Sub-unit': subunit_name,
@@ -165,7 +218,7 @@ class DataProcessor:
         
         return payments
     
-    def process_bank_message(self, bank_msg: Dict[str, Any], proposal_id: Any, subunit_name: str, subunit_address: str, proposal_text: str = '', proposal_date: str = '') -> List[Dict[str, Any]]:
+    def process_bank_message(self, bank_msg: Dict[str, Any], proposal_id: Any, subunit_name: str, subunit_address: str, proposal_text: str = '', proposal_date: str = '', proposal_title: str = '') -> List[Dict[str, Any]]:
         """Process bank send messages"""
         payments = []
         
@@ -187,6 +240,7 @@ class DataProcessor:
                     
                     payments.append({
                         'Proposal ID': proposal_id,
+                        'Proposal Title': proposal_title,
                         'Proposal Text': proposal_text,
                         'Proposal Date': proposal_date,
                         'Sub-unit': subunit_name,
@@ -204,53 +258,93 @@ class DataProcessor:
         
         return payments
     
-    def process_wasm_message(self, wasm_msg: Dict[str, Any], proposal_id: Any, subunit_name: str, subunit_address: str, proposal_text: str = '', proposal_date: str = '') -> List[Dict[str, Any]]:
-        """Process wasm execute messages with base64 decoding, aggregate recipients, and avoid duplicate rows."""
+    def process_wasm_message(self, wasm_msg: Dict[str, Any], proposal_id: Any, subunit_name: str, subunit_address: str, proposal_text: str = '', proposal_date: str = '', proposal_title: str = '') -> List[Dict[str, Any]]:
+        """Process wasm execute messages, including vesting/payroll contracts, and ensure one row per recipient/amount pair."""
         payments = []
         try:
             if 'execute' in wasm_msg:
                 execute_msg = wasm_msg['execute']
-                contract = execute_msg.get('contract', '')
+                contract = execute_msg.get('contract', '') or execute_msg.get('contract_addr', '')
                 msg = execute_msg.get('msg', {})
                 funds = execute_msg.get('funds', [])
 
                 # Try to decode base64 encoded message
                 decoded_msg = self._decode_wasm_message(msg)
 
-                # Aggregate recipients and amounts if present
-                recipients = []
-                amounts = []
-                # Handle transfer/send fields
-                for key in ['transfer', 'send']:
-                    if key in decoded_msg:
-                        rec = decoded_msg[key].get('recipient')
-                        amt = decoded_msg[key].get('amount')
-                        if rec:
-                            recipients.append(str(rec))
-                        if amt:
-                            amounts.append(str(amt))
 
-                # If multiple recipients, concatenate them
-                recipient_field = ', '.join(recipients) if recipients else ''
-                amount_field = ', '.join(amounts) if amounts else ''
+                # Handle vesting/payroll contract instantiation
+                for key, value in decoded_msg.items():
+                    if key == 'instantiate_native_payroll_contract' and isinstance(value, dict):
+                        inst_msg = value.get('instantiate_msg', {})
+                        recipient = inst_msg.get('recipient')
+                        total = inst_msg.get('total')
+                        denom = inst_msg.get('denom', {}).get('native', 'token')
+                        if recipient and total:
+                            payments.append({
+                                'Proposal ID': proposal_id,
+                                'Proposal Title': proposal_title,
+                                'Proposal Text': proposal_text,
+                                'Proposal Date': proposal_date,
+                                'Sub-unit': subunit_name,
+                                'Sub-unit Address': subunit_address,
+                                'Recipient': recipient,
+                                'Amount (uosmo)': str(total),
+                                'Amount (Raw)': float(total) if str(total).isdigit() else 0,
+                                'Amount (OSMO)': float(total) / 1000000 if str(total).isdigit() else 0.0,
+                                'Denom': denom,
+                                'Message Type': 'wasm_instantiate_native_payroll_contract',
+                                'Contract Method': key,
+                                'Contract Address': contract
+                            })
+                    # Handle staking messages
+                    if key == 'stake' and isinstance(value, dict):
+                        for fund in funds:
+                            denom = fund.get('denom', '')
+                            amount_value = int(fund.get('amount', '0'))
+                            if denom == 'uosmo':
+                                osmo_amount = amount_value / 1000000
+                            else:
+                                osmo_amount = amount_value
+                            payments.append({
+                                'Proposal ID': proposal_id,
+                                'Proposal Title': proposal_title,
+                                'Proposal Text': proposal_text,
+                                'Proposal Date': proposal_date,
+                                'Sub-unit': subunit_name,
+                                'Sub-unit Address': subunit_address,
+                                'Recipient': contract,
+                                'Amount (uosmo)': str(amount_value),
+                                'Amount (Raw)': amount_value,
+                                'Amount (OSMO)': osmo_amount,
+                                'Denom': denom,
+                                'Message Type': 'wasm_stake',
+                                'Contract Method': key,
+                                'Contract Address': contract,
+                                'Transaction Category': 'Staking'
+                            })
 
-                if recipient_field and amount_field:
-                    # Only add one row for all recipients/amounts in this message
-                    payments.append({
-                        'Proposal ID': proposal_id,
-                        'Proposal Text': proposal_text,
-                        'Proposal Date': proposal_date,
-                        'Sub-unit': subunit_name,
-                        'Sub-unit Address': subunit_address,
-                        'Recipient': recipient_field,
-                        'Amount (uosmo)': amount_field,
-                        'Amount (Raw)': amount_field,  # If multiple, keep as string for now
-                        'Amount (OSMO)': '',  # Not meaningful for multiple
-                        'Denom': 'token',
-                        'Message Type': 'wasm_execute',
-                        'Contract Method': self._extract_method_name(decoded_msg),
-                        'Contract Address': contract
-                    })
+                # Handle transfer/send fields (one row per recipient)
+                for transfer_type in ['transfer', 'send']:
+                    if transfer_type in decoded_msg:
+                        rec = decoded_msg[transfer_type].get('recipient')
+                        amt = decoded_msg[transfer_type].get('amount')
+                        if rec and amt:
+                            payments.append({
+                                'Proposal ID': proposal_id,
+                                'Proposal Title': proposal_title,
+                                'Proposal Text': proposal_text,
+                                'Proposal Date': proposal_date,
+                                'Sub-unit': subunit_name,
+                                'Sub-unit Address': subunit_address,
+                                'Recipient': rec,
+                                'Amount (uosmo)': str(amt),
+                                'Amount (Raw)': float(amt) if str(amt).isdigit() else 0,
+                                'Amount (OSMO)': float(amt) / 1000000 if str(amt).isdigit() else 0.0,
+                                'Denom': 'token',
+                                'Message Type': f'wasm_{transfer_type}',
+                                'Contract Method': transfer_type,
+                                'Contract Address': contract
+                            })
 
                 # Parse complex contract instantiation/execution messages
                 contract_data = self._parse_contract_execution(decoded_msg, contract, proposal_id, proposal_text, subunit_name, subunit_address)
@@ -266,6 +360,7 @@ class DataProcessor:
                         osmo_amount = amount_value
                     payments.append({
                         'Proposal ID': proposal_id,
+                        'Proposal Title': proposal_title,
                         'Proposal Text': proposal_text,
                         'Proposal Date': proposal_date,
                         'Sub-unit': subunit_name,
@@ -283,7 +378,7 @@ class DataProcessor:
             st.warning(f"Error processing wasm message: {str(e)}")
         return payments
     
-    def process_other_message(self, msg: Dict[str, Any], proposal_id: Any, subunit_name: str, subunit_address: str, proposal_text: str = '', proposal_date: str = '') -> List[Dict[str, Any]]:
+    def process_other_message(self, msg: Dict[str, Any], proposal_id: Any, subunit_name: str, subunit_address: str, proposal_text: str = '', proposal_date: str = '', proposal_title: str = '') -> List[Dict[str, Any]]:
         """Process other message types to extract any payment information"""
         payments = []
         
@@ -298,14 +393,15 @@ class DataProcessor:
             
             # Remove the source address from recipients
             recipient_addresses = [addr for addr in addresses if addr != subunit_address]
-            
+
             if recipient_addresses and amounts:
                 for addr in recipient_addresses:
                     amount_value = int(amounts[0]) if amounts else 0
                     osmo_amount = amount_value / 1000000
-                    
+
                     payments.append({
                         'Proposal ID': proposal_id,
+                        'Proposal Title': proposal_title,
                         'Proposal Text': proposal_text,
                         'Proposal Date': proposal_date,
                         'Sub-unit': subunit_name,
@@ -442,8 +538,47 @@ class DataProcessor:
         """
         Get display symbol for a token denomination
         """
-        token_info = self.token_data.get(denom, {})
-        return token_info.get('symbol', denom)
+        if not denom or not isinstance(denom, str):
+            return ''
+
+        # Direct lookup in provided token_data
+        token_info = self.token_data.get(denom)
+        if token_info and isinstance(token_info, dict):
+            sym = token_info.get('symbol')
+            if sym:
+                return sym
+
+        # Normalize denom and try common patterns
+        d = denom.strip()
+        dl = d.lower()
+
+        # Common on-chain microdenoms
+        if dl in ('uosmo', 'uosmosis'):
+            return 'OSMO'
+        # Secret (SCRT) common patterns
+        if 'scrt' in dl or 'secret' in dl:
+            return 'SCRT'
+
+        # If denom is an IBC denom, sometimes the display symbol is stored elsewhere; try to match known token_data values
+        try:
+            for k, info in (self.token_data or {}).items():
+                if not isinstance(info, dict):
+                    continue
+                sym = (info.get('symbol') or '').upper()
+                if not sym:
+                    continue
+                # If the denom string contains the symbol or the info key matches, prefer that symbol
+                if sym in d.upper() or k.upper() in d.upper():
+                    return sym
+        except Exception:
+            pass
+
+        # Fallback: return the denom itself (uppercased for tickers when possible)
+        # If denom looks like a ticker already, return uppercased
+        if len(d) <= 8 and d.isalpha():
+            return d.upper()
+
+        return d
     
     def _classify_recipient(self, recipient: str) -> str:
         """
@@ -607,13 +742,17 @@ class DataProcessor:
             # Convert list to dictionary for faster lookups: {token: {date: price}}
             self.pricing_lookup = {}
             for entry in pricing_list:
-                token = entry['token']
-                date = entry['date']
-                price = entry['price']
-                
-                if token not in self.pricing_lookup:
-                    self.pricing_lookup[token] = {}
-                self.pricing_lookup[token][date] = price
+                token = (entry.get('token') or '').strip()
+                # Normalize token key to uppercase for robust matching (e.g., 'scrt' -> 'SCRT')
+                token_key = token.upper() if token else token
+                date = entry.get('date')
+                price = entry.get('price')
+
+                if not token_key:
+                    continue
+                if token_key not in self.pricing_lookup:
+                    self.pricing_lookup[token_key] = {}
+                self.pricing_lookup[token_key][date] = price
                 
         except (FileNotFoundError, json.JSONDecodeError) as e:
             # If pricing data file is not available, use empty dict
@@ -666,23 +805,96 @@ class DataProcessor:
             if not adjusted_amount or not token_symbol or not proposal_date:
                 return 0.0
             
-            # Look up price in pricing data
-            if token_symbol in self.pricing_lookup:
-                token_prices = self.pricing_lookup[token_symbol]
-                
-                # Try exact date match first
-                if proposal_date in token_prices:
-                    return adjusted_amount * token_prices[proposal_date]
-                
-                # If exact date not found, find closest date
-                available_dates = sorted(token_prices.keys())
-                if available_dates:
-                    # Find closest date
-                    target_date = datetime.strptime(proposal_date, '%Y-%m-%d')
-                    closest_date = min(available_dates, 
-                                     key=lambda x: abs((datetime.strptime(x, '%Y-%m-%d') - target_date).days))
-                    return adjusted_amount * token_prices[closest_date]
+            # Prepare candidate keys to try for pricing lookup. Pricing tokens are often uppercase tickers.
+            candidates = []
+            try:
+                # Use Display Symbol directly, then a few normalized variants
+                candidates.append(token_symbol)
+                candidates.append(token_symbol.upper())
+                candidates.append(token_symbol.lower())
+                # If token symbol looks like an IBC denom, use the last segment
+                if '/' in token_symbol:
+                    last = token_symbol.split('/')[-1]
+                    candidates.append(last)
+                    candidates.append(last.upper())
+                # Remove non-alphanumeric characters
+                import re
+                clean = re.sub(r'[^A-Za-z0-9]', '', token_symbol)
+                if clean:
+                    candidates.append(clean)
+                    candidates.append(clean.upper())
+            except Exception:
+                candidates = [token_symbol, token_symbol.upper()]
+
+            # Known alias map (common mismatches)
+            alias_map = {
+                'uosmo': 'OSMO',
+                'osmo': 'OSMO',
+                'scrt': 'SCRT'
+            }
+
+            # Try each candidate until a price mapping is found
+            for key in candidates:
+                if not key:
+                    continue
+                # Map aliases
+                lookup_key = alias_map.get(key.lower(), key)
+                lookup_key_up = lookup_key.upper() if isinstance(lookup_key, str) else lookup_key
+                if lookup_key_up in self.pricing_lookup:
+                    token_prices = self.pricing_lookup[lookup_key_up]
+                    # Try exact date match first
+                    if proposal_date in token_prices:
+                        return adjusted_amount * token_prices[proposal_date]
+
+                    # If exact date not found, find closest date
+                    available_dates = sorted(token_prices.keys())
+                    if available_dates:
+                        target_date = datetime.strptime(proposal_date, '%Y-%m-%d')
+                        closest_date = min(available_dates, 
+                                         key=lambda x: abs((datetime.strptime(x, '%Y-%m-%d') - target_date).days))
+                        return adjusted_amount * token_prices[closest_date]
             
+            # If not found in local pricing data, try CoinGecko historical price as a fallback
+            try:
+                # Simple mapping from symbol to CoinGecko id for common tokens
+                cg_map = {
+                    'SCRT': 'secret',
+                    'OSMO': 'osmosis',
+                    'PAGE': 'page'
+                }
+                # Determine a symbol to try
+                sym = token_symbol.upper()
+                cg_id = cg_map.get(sym)
+                if cg_id:
+                    # Initialize cache if needed
+                    if not hasattr(self, '_cg_cache'):
+                        self._cg_cache = {}
+
+                    cache_key = f"{cg_id}:{proposal_date}"
+                    if cache_key in self._cg_cache:
+                        price = self._cg_cache[cache_key]
+                        return adjusted_amount * price if price is not None else 0.0
+
+                    # Query CoinGecko for historical price: date format is DD-MM-YYYY
+                    try:
+                        from requests import get
+                        date_parts = proposal_date.split('-')
+                        if len(date_parts) == 3:
+                            dd = f"{int(date_parts[2]):02d}-{int(date_parts[1]):02d}-{int(date_parts[0])}"
+                            url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/history?date={dd}"
+                            resp = get(url, timeout=6)
+                            if resp.status_code == 200:
+                                j = resp.json()
+                                price = j.get('market_data', {}).get('current_price', {}).get('usd')
+                                # Cache the result (may be None)
+                                self._cg_cache[cache_key] = price
+                                return adjusted_amount * price if price is not None else 0.0
+                    except Exception:
+                        # network or parsing errors — fall through to zero
+                        pass
+            except Exception:
+                pass
+
             return 0.0
             
         except Exception:
