@@ -59,6 +59,13 @@ class DataProcessor:
         df['Transaction Tag'] = df.apply(self._tag_transaction, axis=1)
         df['Amount Category'] = df.apply(self._categorize_amount, axis=1)
         df['Recipient Type'] = df['Recipient'].apply(self._classify_recipient)
+
+        # Deduplicate based on key fields (excluding fields that may differ for same payment)
+        dedup_fields = [
+            'Proposal ID', 'Proposal Date', 'Sub-unit', 'Recipient', 'Amount (uosmo)', 'Denom', 'Message Type', 'Contract Address'
+        ]
+        if all(field in df.columns for field in dedup_fields):
+            df = df.drop_duplicates(subset=dedup_fields, keep='first').reset_index(drop=True)
         
         return df
     
@@ -198,55 +205,65 @@ class DataProcessor:
         return payments
     
     def process_wasm_message(self, wasm_msg: Dict[str, Any], proposal_id: Any, subunit_name: str, subunit_address: str, proposal_text: str = '', proposal_date: str = '') -> List[Dict[str, Any]]:
-        """Process wasm execute messages with base64 decoding"""
+        """Process wasm execute messages with base64 decoding, aggregate recipients, and avoid duplicate rows."""
         payments = []
-        
         try:
             if 'execute' in wasm_msg:
                 execute_msg = wasm_msg['execute']
                 contract = execute_msg.get('contract', '')
                 msg = execute_msg.get('msg', {})
                 funds = execute_msg.get('funds', [])
-                
+
                 # Try to decode base64 encoded message
                 decoded_msg = self._decode_wasm_message(msg)
-                
-                # Check if this is a transfer or payment-related message
-                if 'transfer' in decoded_msg or 'send' in decoded_msg:
-                    recipient = decoded_msg.get('transfer', {}).get('recipient') or decoded_msg.get('send', {}).get('recipient', '')
-                    amount = decoded_msg.get('transfer', {}).get('amount') or decoded_msg.get('send', {}).get('amount', '0')
-                    
-                    if recipient and amount:
-                        payments.append({
-                            'Proposal ID': proposal_id,
-                            'Proposal Text': proposal_text,
-                            'Proposal Date': proposal_date,
-                            'Sub-unit': subunit_name,
-                            'Sub-unit Address': subunit_address,
-                            'Recipient': recipient,
-                            'Amount (uosmo)': str(amount),
-                            'Amount (Raw)': float(amount) if str(amount).isdigit() else 0,
-                            'Amount (OSMO)': float(amount) / 1000000 if str(amount).isdigit() else 0.0,
-                            'Denom': 'token',
-                            'Message Type': 'wasm_execute',
-                            'Contract Method': self._extract_method_name(decoded_msg),
-                            'Contract Address': contract
-                        })
-                
+
+                # Aggregate recipients and amounts if present
+                recipients = []
+                amounts = []
+                # Handle transfer/send fields
+                for key in ['transfer', 'send']:
+                    if key in decoded_msg:
+                        rec = decoded_msg[key].get('recipient')
+                        amt = decoded_msg[key].get('amount')
+                        if rec:
+                            recipients.append(str(rec))
+                        if amt:
+                            amounts.append(str(amt))
+
+                # If multiple recipients, concatenate them
+                recipient_field = ', '.join(recipients) if recipients else ''
+                amount_field = ', '.join(amounts) if amounts else ''
+
+                if recipient_field and amount_field:
+                    # Only add one row for all recipients/amounts in this message
+                    payments.append({
+                        'Proposal ID': proposal_id,
+                        'Proposal Text': proposal_text,
+                        'Proposal Date': proposal_date,
+                        'Sub-unit': subunit_name,
+                        'Sub-unit Address': subunit_address,
+                        'Recipient': recipient_field,
+                        'Amount (uosmo)': amount_field,
+                        'Amount (Raw)': amount_field,  # If multiple, keep as string for now
+                        'Amount (OSMO)': '',  # Not meaningful for multiple
+                        'Denom': 'token',
+                        'Message Type': 'wasm_execute',
+                        'Contract Method': self._extract_method_name(decoded_msg),
+                        'Contract Address': contract
+                    })
+
                 # Parse complex contract instantiation/execution messages
                 contract_data = self._parse_contract_execution(decoded_msg, contract, proposal_id, proposal_text, subunit_name, subunit_address)
                 payments.extend(contract_data)
-                
-                # Also check funds sent with the message
+
+                # Also check funds sent with the message, but avoid duplicate contract/recipient rows
                 for fund in funds:
                     denom = fund.get('denom', '')
                     amount_value = int(fund.get('amount', '0'))
-                    
                     if denom == 'uosmo':
                         osmo_amount = amount_value / 1000000
                     else:
                         osmo_amount = amount_value
-                    
                     payments.append({
                         'Proposal ID': proposal_id,
                         'Proposal Text': proposal_text,
@@ -262,10 +279,8 @@ class DataProcessor:
                         'Contract Method': self._extract_method_name(decoded_msg),
                         'Contract Address': contract
                     })
-                    
         except Exception as e:
             st.warning(f"Error processing wasm message: {str(e)}")
-        
         return payments
     
     def process_other_message(self, msg: Dict[str, Any], proposal_id: Any, subunit_name: str, subunit_address: str, proposal_text: str = '', proposal_date: str = '') -> List[Dict[str, Any]]:

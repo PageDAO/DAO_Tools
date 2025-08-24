@@ -128,8 +128,10 @@ class ReportGenerator:
             'Denom'
         ]
         
-        # Only include columns that exist in the data
+        # Only include columns that exist in the data, but always include 'Proposal Date' if present
         available_columns = [col for col in detailed_columns if col in processed_data.columns]
+        if 'Proposal Date' not in available_columns and 'Proposal Date' in processed_data.columns:
+            available_columns.insert(2, 'Proposal Date')
         detailed_report = processed_data[available_columns].copy()
         
         # Sort by sub-unit and then by amount descending
