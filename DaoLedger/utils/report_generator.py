@@ -295,32 +295,52 @@ class ReportGenerator:
         
         insights = {}
         
-        # Payment distribution insights
+        # Payment distribution insights (keep as Adjusted Amount percent if USD not available)
         if 'Payment Type' in processed_data.columns:
             core_team_amount = processed_data[processed_data['Payment Type'] == 'Core Team']['Adjusted Amount'].sum()
             total_amount = processed_data['Adjusted Amount'].sum()
             insights['core_team_percentage'] = (core_team_amount / total_amount * 100) if total_amount > 0 else 0
         
-        # Largest transaction
-        if 'Adjusted Amount' in processed_data.columns:
-            largest_tx = processed_data.loc[processed_data['Adjusted Amount'].idxmax()]
+        # Largest transaction (prefer USD value when available)
+        try:
+            if 'USD Value' in processed_data.columns and processed_data['USD Value'].notnull().any():
+                largest_idx = processed_data['USD Value'].idxmax()
+                largest_tx = processed_data.loc[largest_idx]
+                usd_val = float(largest_tx.get('USD Value', 0) or 0)
+            else:
+                largest_idx = processed_data['Adjusted Amount'].idxmax()
+                largest_tx = processed_data.loc[largest_idx]
+                usd_val = float(largest_tx.get('Adjusted Amount', 0) or 0)
+
             insights['largest_transaction'] = {
-                'amount': largest_tx['Adjusted Amount'],
+                'usd_value': usd_val,
+                'amount': largest_tx.get('Adjusted Amount', 0),
                 'recipient': largest_tx.get('Recipient', 'Unknown'),
                 'sub_unit': largest_tx.get('Sub-unit', 'Unknown'),
                 'category': largest_tx.get('Transaction Category', 'Unknown'),
                 'symbol': largest_tx.get('Display Symbol', 'tokens')
             }
+        except Exception:
+            # If something goes wrong, skip largest transaction insight
+            pass
         
-        # Most frequent recipient
+        # Most frequent recipient (report total in USD when available)
         if 'Recipient' in processed_data.columns:
             recipient_counts = processed_data['Recipient'].value_counts()
             if len(recipient_counts) > 0:
                 most_frequent_recipient = recipient_counts.index[0]
+                try:
+                    if 'USD Value' in processed_data.columns:
+                        total_usd = float(processed_data[processed_data['Recipient'] == most_frequent_recipient]['USD Value'].sum() or 0)
+                    else:
+                        total_usd = float(processed_data[processed_data['Recipient'] == most_frequent_recipient]['Adjusted Amount'].sum() or 0)
+                except Exception:
+                    total_usd = 0
+
                 insights['most_frequent_recipient'] = {
                     'address': most_frequent_recipient,
                     'count': recipient_counts.iloc[0],
-                    'total_amount': processed_data[processed_data['Recipient'] == most_frequent_recipient]['Adjusted Amount'].sum()
+                    'total_usd': total_usd
                 }
         
         # Average transaction size by category
@@ -400,7 +420,217 @@ class ReportGenerator:
         """
         return processed_data.to_json(orient='records', indent=2) or '[]'
 
-    def export_to_pdf(self, processed_data: pd.DataFrame, detailed_df: Optional[pd.DataFrame] = None, filename: Optional[str] = None, title: str = "DAO Accounting Report", include_zero_usd: bool = False) -> bytes:
+    def export_to_pdf(self, processed_data: pd.DataFrame, detailed_df: pd.DataFrame, title: str = 'DAO Accounting Report', include_zero_usd: bool = False) -> Optional[bytes]:
+        """
+        Export a full report PDF containing all page sections.
+
+        Args:
+            processed_data: full processed DataFrame
+            detailed_df: filtered or full detailed DataFrame (as built by generate_detailed_report)
+            title: report title
+            include_zero_usd: whether zero-USD rows were included (for header note)
+
+        Returns:
+            PDF bytes or None on failure
+        """
+        try:
+            # Import reportlab lazily to avoid hard dependency at module import
+            from reportlab.lib.pagesizes import landscape, A4
+            from reportlab.lib import colors
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+            from reportlab.lib.styles import getSampleStyleSheet
+            import io
+
+            styles = getSampleStyleSheet()
+            buf = io.BytesIO()
+            doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=18, rightMargin=18, topMargin=18, bottomMargin=18)
+            story = []
+
+            # Title
+            story.append(Paragraph(title, styles['Title']))
+            story.append(Spacer(1, 12))
+
+            # Summary stats
+            stats = self.generate_summary_stats(processed_data)
+            total_payments = stats.get('total_payments', 0)
+            total_usd = stats.get('total_usd_value', 0)
+            core_team_cnt = stats.get('core_team_payments', 0)
+            subunits_count = stats.get('subunits_count', 0)
+
+            story.append(Paragraph(f"Total Transactions: {total_payments:,}", styles['Normal']))
+            if total_usd and total_usd > 0:
+                story.append(Paragraph(f"Total USD Value: ${total_usd:,.2f}", styles['Normal']))
+            else:
+                story.append(Paragraph(f"Total Amount: {stats.get('total_amount_osmo', 0):,.2f} (mixed tokens)", styles['Normal']))
+            story.append(Paragraph(f"Core Team Transactions: {core_team_cnt:,}", styles['Normal']))
+            story.append(Paragraph(f"Sub-DAOs: {subunits_count:,}", styles['Normal']))
+            story.append(Spacer(1, 12))
+
+            # Key insights
+            insights = self.generate_transaction_insights(processed_data)
+            story.append(Paragraph("Key Insights", styles['Heading2']))
+            story.append(Spacer(1, 6))
+            if insights:
+                # Largest transaction
+                largest = insights.get('largest_transaction')
+                if largest:
+                    usd_val = largest.get('usd_value')
+                    if usd_val is not None and usd_val > 0:
+                        story.append(Paragraph(f"Largest Transaction: ${usd_val:,.2f} to {str(largest.get('recipient',''))[:40]}... ({largest.get('category','')})", styles['Normal']))
+                    else:
+                        story.append(Paragraph(f"Largest Transaction: {largest.get('amount',0):,.2f} {largest.get('symbol','tokens')} to {str(largest.get('recipient',''))[:40]}... ({largest.get('category','')})", styles['Normal']))
+
+                # Most frequent recipient
+                frequent = insights.get('most_frequent_recipient')
+                if frequent:
+                    total_usd_rec = frequent.get('total_usd')
+                    if total_usd_rec is not None:
+                        story.append(Paragraph(f"Most Frequent Recipient: {frequent.get('count',0)} transactions totaling ${total_usd_rec:,.2f}", styles['Normal']))
+                    else:
+                        story.append(Paragraph(f"Most Frequent Recipient: {frequent.get('count',0)} transactions", styles['Normal']))
+
+            story.append(Spacer(1, 12))
+
+            # Helper to add a small dataframe table
+            def add_table_from_df(df: pd.DataFrame, max_cols=8, title_text=None):
+                if df is None or df.empty:
+                    return
+                if title_text:
+                    story.append(Paragraph(title_text, styles['Heading3']))
+                # Limit number of columns shown to avoid layout overflow
+                cols = list(df.columns[:max_cols])
+                data = [cols]
+                # format rows
+                for _, r in df.iterrows():
+                    row = []
+                    for c in cols:
+                        val = r.get(c, '')
+                        if pd.isna(val):
+                            val = ''
+                        # Format floats
+                        if isinstance(val, float):
+                            val = f"{val:,.2f}"
+                        row.append(str(val))
+                    data.append(row)
+
+                tbl = Table(data, repeatRows=1)
+                tbl_style = TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f2f2f2')),
+                    ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 8),
+                ])
+                tbl.setStyle(tbl_style)
+                story.append(tbl)
+                story.append(Spacer(1, 12))
+
+            # Payments by sub-unit
+            try:
+                subunit_summary = self.generate_subunit_summary(processed_data)
+                add_table_from_df(subunit_summary, max_cols=4, title_text='Payments by Sub-unit (USD)')
+            except Exception:
+                pass
+
+            # Category breakdown
+            try:
+                cat = self.generate_category_breakdown(processed_data)
+                add_table_from_df(cat, max_cols=4, title_text='Transaction Categories (USD)')
+            except Exception:
+                pass
+
+            # Amount range analysis
+            try:
+                amt = self.generate_amount_range_analysis(processed_data)
+                add_table_from_df(amt, max_cols=4, title_text='Amount Range Analysis (USD)')
+            except Exception:
+                pass
+
+            # Core team breakdown
+            try:
+                core = self.generate_core_team_breakdown(processed_data)
+                add_table_from_df(core, max_cols=4, title_text='Core Team vs Non-Core Team (USD)')
+            except Exception:
+                pass
+
+            # Transaction tags (summary of top tags)
+            try:
+                if 'Transaction Tag' in processed_data.columns:
+                    tags_data = []
+                    for _, row in processed_data.iterrows():
+                        tag_value = row['Transaction Tag']
+                        if isinstance(tag_value, str):
+                            tags = tag_value.split(' | ')
+                        else:
+                            tags = [str(tag_value)]
+                        for tag in tags:
+                            tags_data.append({'Tag': tag, 'USD Value': row.get('USD Value', 0)})
+                    tags_df = pd.DataFrame(tags_data)
+                    if not tags_df.empty:
+                        tag_summary = tags_df.groupby('Tag').agg({'USD Value': ['sum', 'count']}).round(2)
+                        tag_summary.columns = ['Total USD', 'Count']
+                        tag_summary = tag_summary.reset_index().sort_values('Total USD', ascending=False)
+                        add_table_from_df(tag_summary, max_cols=4, title_text='Top Transaction Tags by USD')
+            except Exception:
+                pass
+
+            # Detailed transactions table (paginate)
+            story.append(PageBreak())
+            story.append(Paragraph('Detailed Transactions', styles['Heading2']))
+            story.append(Spacer(1, 6))
+
+            # Prepare detailed rows and paginate (25 rows per page)
+            rows_per_page = 25
+            if detailed_df is None or detailed_df.empty:
+                story.append(Paragraph('No detailed transactions available.', styles['Normal']))
+            else:
+                # Ensure columns exist and are strings for presentation
+                display_df = detailed_df.copy()
+                # Truncate long text fields
+                for col in display_df.columns:
+                    display_df[col] = display_df[col].apply(lambda x: (str(x)[:120] + '...') if isinstance(x, str) and len(x) > 120 else x)
+
+                headers = list(display_df.columns)
+                total_rows = len(display_df)
+                for start in range(0, total_rows, rows_per_page):
+                    chunk = display_df.iloc[start:start+rows_per_page]
+                    data = [headers]
+                    for _, r in chunk.iterrows():
+                        row = []
+                        for h in headers:
+                            v = r.get(h, '')
+                            if pd.isna(v):
+                                v = ''
+                            if isinstance(v, float):
+                                v = f"{v:,.2f}"
+                            row.append(str(v))
+                        data.append(row)
+
+                    tbl = Table(data, repeatRows=1)
+                    tbl.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f2f2f2')),
+                        ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+                        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                        ('FONTSIZE', (0, 0), (-1, -1), 7),
+                    ]))
+                    story.append(tbl)
+                    story.append(Spacer(1, 12))
+                    if start + rows_per_page < total_rows:
+                        story.append(PageBreak())
+
+            # Build PDF
+            doc.build(story)
+            pdf_bytes = buf.getvalue()
+            buf.close()
+            return pdf_bytes
+
+        except Exception as e:
+            try:
+                st.warning(f"PDF export failed: {e}")
+            except Exception:
+                pass
+            return None
+
+    def export_to_pdf(self, processed_data: pd.DataFrame, detailed_df: Optional[pd.DataFrame] = None, filename: Optional[str] = None, title: str = "DAO Accounting Report", include_zero_usd: bool = False, subdaos: Optional[list] = None, main_dao: Optional[str] = None, core_team: Optional[list] = None, proposals_count: Optional[int] = None) -> bytes:
         """
         Export the detailed report to a PDF and return bytes.
 
@@ -420,7 +650,7 @@ class ReportGenerator:
 
         try:
             from reportlab.lib.pagesizes import A4, landscape
-            from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+            from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak, Image
             from reportlab.lib import colors
             from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
             from reportlab.lib.enums import TA_LEFT
@@ -436,14 +666,207 @@ class ReportGenerator:
         bottom_margin = 18
         doc = SimpleDocTemplate(buf, pagesize=page_size, rightMargin=right_margin, leftMargin=left_margin, topMargin=top_margin, bottomMargin=bottom_margin)
         styles = getSampleStyleSheet()
-        body_style = ParagraphStyle('body', parent=styles['Normal'], fontSize=6, leading=8, alignment=TA_LEFT)
+        body_style = ParagraphStyle('body', parent=styles['Normal'], fontSize=8, leading=10, alignment=TA_LEFT)
         title_style = styles.get('Title', styles['Normal'])
+        heading_style = styles.get('Heading2', styles['Normal'])
         elems = []
 
+        # --- Header Page with parameters ---
         elems.append(Paragraph(title, title_style))
+        elems.append(Spacer(1, 12))
+
+        # Parameters summary (subdaos, main dao, core team, number of proposals)
+        elems.append(Paragraph('Report Parameters', heading_style))
+        elems.append(Spacer(1, 6))
+        # Sub-DAOs
+        subdaos_display = ', '.join(subdaos) if subdaos else ', '.join(sorted(list(set(processed_data.get('Sub-unit', []).tolist()))))
+        elems.append(Paragraph(f"Sub-DAOs: {subdaos_display}", body_style))
+        # Main DAO
+        if main_dao:
+            elems.append(Paragraph(f"Main DAO: {main_dao}", body_style))
+        # Core team
+        if core_team:
+            core_preview = ', '.join(core_team[:10]) + ('' if len(core_team) <= 10 else f" (+{len(core_team)-10} more)")
+            elems.append(Paragraph(f"Core Team Members (sample): {core_preview}", body_style))
+        # Proposals count
+        if proposals_count is None:
+            # try to infer from processed_data if available
+            try:
+                proposals_count = int(processed_data['Proposal ID'].nunique())
+            except Exception:
+                proposals_count = None
+        if proposals_count is not None:
+            elems.append(Paragraph(f"Proposals Reviewed: {proposals_count}", body_style))
+
+        elems.append(Spacer(1, 12))
+
+        # Key Insights (all)
+        elems.append(Paragraph('Key Insights', heading_style))
+        elems.append(Spacer(1, 6))
+        insights = self.generate_transaction_insights(processed_data)
+        if insights:
+            # Print each insight key/value in a readable way
+            for k, v in insights.items():
+                try:
+                    elems.append(Paragraph(f"{k.replace('_',' ').title()}: {str(v)}", body_style))
+                except Exception:
+                    elems.append(Paragraph(f"{k}: (unavailable)", body_style))
+        else:
+            elems.append(Paragraph('No key insights available.', body_style))
+
+        elems.append(PageBreak())
+
+        # --- Second section: Breakdowns and charts ---
+        elems.append(Paragraph('Breakdowns', heading_style))
         elems.append(Spacer(1, 8))
 
-        # Ensure the detailed DataFrame contains the exact columns we want in the PDF
+        # Helper: convert plotly figure to image bytes (PNG) if available
+        def fig_to_png_bytes(fig):
+            try:
+                # Try using plotly's to_image (requires kaleido)
+                img_bytes = fig.to_image(format='png')
+                return img_bytes
+            except Exception:
+                try:
+                    # fallback to write_image
+                    import io as _io
+                    buf_img = _io.BytesIO()
+                    fig.write_image(buf_img, format='png')
+                    return buf_img.getvalue()
+                except Exception:
+                    return None
+
+        # Helper to add an image to elems if bytes available
+        def add_image_bytes(img_bytes, max_width_ratio=0.9):
+            if not img_bytes:
+                return
+            try:
+                from reportlab.platypus import Image as RLImage
+                import io as _io
+                img_buf = _io.BytesIO(img_bytes)
+                # estimate width
+                page_w, _ = page_size
+                usable_w = page_w - left_margin - right_margin
+                img = RLImage(img_buf, width=usable_w * max_width_ratio)
+                elems.append(img)
+                elems.append(Spacer(1, 8))
+            except Exception:
+                return
+
+        # Try to create plotly charts; if plotly/kaleido not available, skip charts gracefully
+        try:
+            import plotly.express as px
+            has_plotly = True
+        except Exception:
+            has_plotly = False
+
+        def add_table_from_df_local(df: pd.DataFrame, max_cols=8, title_text=None):
+            # local version to reuse styles/spacing in this function
+            if df is None or df.empty:
+                return
+            if title_text:
+                elems.append(Paragraph(title_text, styles.get('Heading3', styles['Normal'])))
+            cols = list(df.columns[:max_cols])
+            data = [cols]
+            for _, r in df.iterrows():
+                row = []
+                for c in cols:
+                    val = r.get(c, '')
+                    if pd.isna(val):
+                        val = ''
+                    if isinstance(val, float):
+                        val = f"{val:,.2f}"
+                    row.append(str(val))
+                data.append(row)
+            tbl = Table(data, repeatRows=1)
+            tbl_style = TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f2f2f2')),
+                ('GRID', (0, 0), (-1, -1), 0.25, colors.grey),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ])
+            tbl.setStyle(tbl_style)
+            elems.append(tbl)
+            elems.append(Spacer(1, 12))
+
+        # Payments by sub-unit: table + chart
+        subunit_summary = self.generate_subunit_summary(processed_data)
+        add_table_from_df_local(subunit_summary, max_cols=4, title_text='Payments by Sub-unit (USD)')
+        if has_plotly and subunit_summary is not None and not subunit_summary.empty:
+            try:
+                fig = px.bar(subunit_summary, x='Sub-unit', y='Total USD', title='Payments by Sub-unit (USD)', text='Number of Payments')
+                img = fig_to_png_bytes(fig)
+                add_image_bytes(img)
+            except Exception:
+                pass
+
+        # Then each requested breakdown with chart then details
+        # Transaction Categories
+        cat = self.generate_category_breakdown(processed_data)
+        if has_plotly and cat is not None and not cat.empty:
+            try:
+                fig = px.pie(cat, names='Transaction Category', values='Total USD', title='Transaction Categories by USD')
+                img = fig_to_png_bytes(fig)
+                add_image_bytes(img)
+            except Exception:
+                pass
+        add_table_from_df_local(cat, max_cols=4, title_text='💰 Payment Categories (USD)')
+
+        # Amount Ranges
+        amt = self.generate_amount_range_analysis(processed_data)
+        if has_plotly and amt is not None and not amt.empty:
+            try:
+                fig = px.bar(amt, x='Amount Category', y='Total USD', title='Amount Ranges (USD)')
+                img = fig_to_png_bytes(fig)
+                add_image_bytes(img)
+            except Exception:
+                pass
+        add_table_from_df_local(amt, max_cols=4, title_text='📊 Amount Ranges')
+
+        # Core Team Analysis
+        core = self.generate_core_team_breakdown(processed_data)
+        if has_plotly and core is not None and not core.empty:
+            try:
+                fig = px.pie(core, names='Type', values='Total USD', title='Core Team vs Non-Core (USD)')
+                img = fig_to_png_bytes(fig)
+                add_image_bytes(img)
+            except Exception:
+                pass
+        add_table_from_df_local(core, max_cols=4, title_text='👥 Core Team Analysis')
+
+        # Transaction Tags
+        try:
+            if 'Transaction Tag' in processed_data.columns:
+                tags_data = []
+                for _, row in processed_data.iterrows():
+                    tag_value = row['Transaction Tag']
+                    if isinstance(tag_value, str):
+                        tags = tag_value.split(' | ')
+                    else:
+                        tags = [str(tag_value)]
+                    for tag in tags:
+                        tags_data.append({'Tag': tag, 'USD Value': row.get('USD Value', 0)})
+                tags_df = pd.DataFrame(tags_data)
+                if not tags_df.empty:
+                    tag_summary = tags_df.groupby('Tag').agg({'USD Value': ['sum', 'count']}).round(2)
+                    tag_summary.columns = ['Total USD', 'Count']
+                    tag_summary = tag_summary.reset_index().sort_values('Total USD', ascending=False)
+                    if has_plotly and not tag_summary.empty:
+                        try:
+                            fig = px.bar(tag_summary.head(20), x='Tag', y='Total USD', title='Top Transaction Tags by USD')
+                            img = fig_to_png_bytes(fig)
+                            add_image_bytes(img, max_width_ratio=0.95)
+                        except Exception:
+                            pass
+                    add_table_from_df_local(tag_summary, max_cols=4, title_text='🏷️ Transaction Tags')
+        except Exception:
+            pass
+
+        elems.append(PageBreak())
+
+        # --- Detailed transactions (kept as the final section) ---
+        elems.append(Paragraph('Detailed Transactions', heading_style))
+        elems.append(Spacer(1, 6))
         final_columns = [
             'Proposal Date',
             'Proposal ID',

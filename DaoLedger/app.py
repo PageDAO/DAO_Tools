@@ -65,6 +65,10 @@ def main():
         st.session_state.selected_subdaos = {}
     if 'main_dao_info' not in st.session_state:
         st.session_state.main_dao_info = {}
+    if 'main_dao_address' not in st.session_state:
+        st.session_state.main_dao_address = ""
+    if 'include_main_dao' not in st.session_state:
+        st.session_state.include_main_dao = False
     if 'initial_load' not in st.session_state:
         st.session_state.initial_load = True
     if 'token_data' not in st.session_state:
@@ -101,6 +105,15 @@ def main():
             value="osmo1a40j922z0kwqhw2nn0nx66ycyk88vyzcs73fyjrd092cjgyvyjksrd8dp7",
             placeholder="osmo1...",
             help="Enter the main DAO contract address"
+        )
+        # persist the input value in session state so other UI areas can access it
+        st.session_state.main_dao_address = main_dao_address
+
+        # Option to include the main DAO itself when fetching proposals
+        st.session_state.include_main_dao = st.checkbox(
+            "Include Main DAO in proposal fetch",
+            value=st.session_state.include_main_dao,
+            help="When enabled, the main DAO's own proposals will be fetched in addition to selected sub-DAOs"
         )
         
         if st.button("🔄 Update DAO Info"):
@@ -276,6 +289,12 @@ def main():
                 col_idx += 1
         
         # Summary of selected sub-DAOs
+        # If the user requested including the Main DAO, add it to the set of subunits to fetch
+        if st.session_state.get('include_main_dao') and st.session_state.get('main_dao_address'):
+            # Use a fixed key so downstream code can reliably find the main DAO entry
+            main_key = 'Main DAO'
+            subunits[main_key] = st.session_state.main_dao_address
+
         if subunits:
             st.markdown("---")
             st.markdown(f"**Selected Sub-DAOs ({len(subunits)}):**")
@@ -428,12 +447,22 @@ def main():
                     largest = insights['largest_transaction']
                     # Get token symbol for largest transaction
                     largest_symbol = largest.get('symbol', 'tokens')
-                    st.info(f"**Largest Transaction:** {largest['amount']:,.2f} {largest_symbol} to {largest['recipient'][:20]}... ({largest['category']})")
+                    # Prefer USD value display when available
+                    usd_display = largest.get('usd_value')
+                    if usd_display is not None:
+                        st.info(f"**Largest Transaction:** ${usd_display:,.2f} to {largest['recipient'][:20]}... ({largest['category']})")
+                    else:
+                        st.info(f"**Largest Transaction:** {largest['amount']:,.2f} {largest_symbol} to {largest['recipient'][:20]}... ({largest['category']})")
             
             with col2:
                 if 'most_frequent_recipient' in insights:
                     frequent = insights['most_frequent_recipient']
-                    st.info(f"**Most Frequent Recipient:** {frequent['count']} payments totaling {frequent['total_amount']:,.2f} (mixed tokens)")
+                    total_usd = frequent.get('total_usd')
+                    if total_usd is not None:
+                        st.info(f"**Most Frequent Recipient:** {frequent['count']} transactions totaling ${total_usd:,.2f}")
+                    else:
+                        # Fallback to count-only message but use 'transactions' wording
+                        st.info(f"**Most Frequent Recipient:** {frequent['count']} transactions")
         
         # Payments by sub-unit
         st.subheader("Payments by Sub-unit (USD)")
@@ -625,7 +654,11 @@ def main():
                                     processed_data=st.session_state.processed_data,
                                     detailed_df=filtered_transactions,
                                     title=f"DAO Accounting Report - Filtered {datetime.now().strftime('%Y-%m-%d')}",
-                                    include_zero_usd=st.session_state.include_zero_usd
+                                    include_zero_usd=st.session_state.include_zero_usd,
+                                    subdaos=list(subunits.keys()) if subunits else None,
+                                    main_dao=st.session_state.main_dao_address or None,
+                                    core_team=core_team_addresses,
+                                    proposals_count=sum([len(v.get('proposals', [])) for v in st.session_state.proposal_data.values()])
                                 )
                                 if pdf_bytes:
                                     st.download_button(
@@ -651,7 +684,11 @@ def main():
                                     processed_data=st.session_state.processed_data,
                                     detailed_df=detailed_for_pdf,
                                     title=f"DAO Accounting Report - Full {datetime.now().strftime('%Y-%m-%d')}",
-                                    include_zero_usd=st.session_state.include_zero_usd
+                                    include_zero_usd=st.session_state.include_zero_usd,
+                                    subdaos=list(subunits.keys()) if subunits else None,
+                                    main_dao=st.session_state.main_dao_address or None,
+                                    core_team=core_team_addresses,
+                                    proposals_count=sum([len(v.get('proposals', [])) for v in st.session_state.proposal_data.values()])
                                 )
                                 if pdf_bytes:
                                     st.download_button(

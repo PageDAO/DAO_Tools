@@ -427,6 +427,15 @@ class DataProcessor:
         amount = row.get('Adjusted Amount', row.get('Amount (OSMO)', 0))
         message_type = row.get('Message Type', '')
         payment_type = row.get('Payment Type', '')
+        existing_category = row.get('Transaction Category', '')
+
+        # If the message or existing category indicates staking, return Staking
+        try:
+            mt_lower = (message_type or '').lower()
+            if 'stake' in mt_lower or 'staking' in mt_lower or str(existing_category).lower() == 'staking':
+                return 'Staking'
+        except Exception:
+            pass
         
         # Large amount transactions (over 10,000 OSMO)
         if amount >= 10000:
@@ -735,27 +744,44 @@ class DataProcessor:
         """
         Load pricing data from the attached file
         """
-        try:
-            with open('attached_assets/combined_daily_prices_1756000184191.json', 'r') as f:
-                pricing_list = json.load(f)
-            
-            # Convert list to dictionary for faster lookups: {token: {date: price}}
-            self.pricing_lookup = {}
-            for entry in pricing_list:
-                token = (entry.get('token') or '').strip()
-                # Normalize token key to uppercase for robust matching (e.g., 'scrt' -> 'SCRT')
-                token_key = token.upper() if token else token
-                date = entry.get('date')
-                price = entry.get('price')
+        # Try multiple known locations for the combined pricing JSON so the processor
+        # works whether the file was placed under attached_assets or generated under pagedata/
+        paths_to_try = [
+            'attached_assets/combined_daily_prices_1756000184191.json',
+            'attached_assets/combined_daily_prices.json',
+            'pagedata/combined_daily_prices.json',
+            'pagedata/osmo_secret_daily_prices.json'
+        ]
 
-                if not token_key:
-                    continue
-                if token_key not in self.pricing_lookup:
-                    self.pricing_lookup[token_key] = {}
-                self.pricing_lookup[token_key][date] = price
-                
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            # If pricing data file is not available, use empty dict
+        self.pricing_lookup = {}
+        for p in paths_to_try:
+            try:
+                with open(p, 'r') as f:
+                    pricing_list = json.load(f)
+
+                # Convert list to dictionary for faster lookups: {token: {date: price}}
+                for entry in pricing_list:
+                    token = (entry.get('token') or '').strip()
+                    token_key = token.upper() if token else token
+                    date = entry.get('date')
+                    price = entry.get('price')
+
+                    if not token_key or not date:
+                        continue
+                    if token_key not in self.pricing_lookup:
+                        self.pricing_lookup[token_key] = {}
+                    # prefer earlier-loaded entries but allow later files to fill missing dates
+                    if date not in self.pricing_lookup[token_key]:
+                        self.pricing_lookup[token_key][date] = price
+
+                # If we populated any pricing data, stop trying further files
+                if any(self.pricing_lookup.values()):
+                    return
+            except (FileNotFoundError, json.JSONDecodeError, PermissionError):
+                continue
+
+        # If none of the files were found or parsed, ensure pricing_lookup is an empty dict
+        if not self.pricing_lookup:
             self.pricing_lookup = {}
     
     def _extract_proposal_date(self, proposal: Dict[str, Any]) -> str:
