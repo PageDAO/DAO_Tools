@@ -1,5 +1,5 @@
 [project]
-name = "dao-ledger"
+name = "dao_ledger"
 version = "0.1.0"
 description = "Streamlit application to generate DAO accounting reports from proposal data."
 readme = "readme.md"
@@ -23,3 +23,7 @@ Documentation = "https://github.com/PageDAO/DAO_Tools#readme"
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["DaoLedger"]
+include = ["DaoLedger*"]
