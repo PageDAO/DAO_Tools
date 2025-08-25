@@ -240,6 +240,8 @@ def main():
     
     # Sub-DAO Selection in main area
     subunits = {}
+    # Defensive default to avoid NameError later if no sub-DAOs are present
+    fetch_button = False
     
     if st.session_state.subdaos:
         st.markdown("**Select sub-DAOs to include in the accounting report:**")
@@ -363,7 +365,14 @@ def main():
             # Process the fetched data
             if st.session_state.proposal_data:
                 processor = DataProcessor(core_team_addresses, st.session_state.token_data)
-                st.session_state.processed_data = processor.process_all_proposals(st.session_state.proposal_data)
+                processed_res = processor.process_all_proposals(st.session_state.proposal_data)
+                # Ensure we always store a pandas DataFrame in session state
+                try:
+                    if not isinstance(processed_res, pd.DataFrame):
+                        processed_res = pd.DataFrame(processed_res)
+                except Exception:
+                    processed_res = pd.DataFrame()
+                st.session_state.processed_data = processed_res
                 st.success("✅ Data processing completed!")
             
             status_text.empty()
@@ -415,7 +424,14 @@ def main():
                 st.write(diagnostics)
     
     # Generate and display report automatically when data is available
-    if st.session_state.processed_data is not None and not st.session_state.processed_data.empty:
+    processed_data_available = False
+    if isinstance(st.session_state.processed_data, pd.DataFrame):
+        try:
+            processed_data_available = not st.session_state.processed_data.empty
+        except Exception:
+            processed_data_available = False
+
+    if processed_data_available:
         st.subheader("📊 Accounting Report")
         
         report_generator = ReportGenerator()
