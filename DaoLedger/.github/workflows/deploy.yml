@@ -32,4 +32,4 @@ jobs:
 
     - name: Build Docker image (optional)
       run: |
-        docker build -t dao-ledger:latest .
+        docker build -t dao_ledger:latest .
