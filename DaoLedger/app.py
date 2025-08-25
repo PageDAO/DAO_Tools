@@ -3,14 +3,20 @@ import streamlit as st
 import json
 import requests
 from datetime import datetime
-import plotly.express as px
+import plotly
 import streamlit as st
 import pandas as pd
 import json
 import requests
 from datetime import datetime
-import plotly.express as px
-import plotly.graph_objects as go
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+    HAS_PLOTLY = True
+except Exception:
+    px = None
+    go = None
+    HAS_PLOTLY = False
 from utils.api_client import DAOAPIClient
 from utils.data_processor import DataProcessor
 from utils.report_generator import ReportGenerator
@@ -469,127 +475,159 @@ def main():
         subunit_summary = report_generator.generate_subunit_summary(st.session_state.processed_data)
         if subunit_summary is None:
             subunit_summary = pd.DataFrame()
+
         if not subunit_summary.empty:
             st.dataframe(subunit_summary, use_container_width=True)
-            fig_pie = px.pie(
-                subunit_summary,
-                values='Total USD',
-                names='Sub-unit',
-                title="Payment Distribution by Sub-unit (USD)"
-            )
-            st.plotly_chart(fig_pie, use_container_width=True)
-            
-            # Enhanced analysis sections
-            tab1, tab2, tab3, tab4 = st.tabs(["💰 Payment Categories", "📊 Amount Ranges", "👥 Core Team Analysis", "🏷️ Transaction Tags"])
-            
-            with tab1:
-                st.subheader("Transaction Categories (USD)")
-                category_breakdown = report_generator.generate_category_breakdown(st.session_state.processed_data)
-                if not category_breakdown.empty:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.dataframe(category_breakdown, use_container_width=True)
-                    with col2:
-                        fig_category = px.pie(
-                            category_breakdown,
-                            values='Total USD',
-                            names='Transaction Category',
-                            title="Spending by Transaction Category (USD)"
-                        )
-                        st.plotly_chart(fig_category, use_container_width=True)
-            
-            with tab2:
-                st.subheader("Amount Range Analysis (USD)")
-                amount_analysis = report_generator.generate_amount_range_analysis(st.session_state.processed_data)
-                if not amount_analysis.empty:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.dataframe(amount_analysis, use_container_width=True)
-                    with col2:
-                        fig_amounts = px.bar(
-                            amount_analysis,
-                            x='Amount Category',
-                            y='Total USD',
-                            title="Spending by Amount Range (USD)",
-                            text='Number of Transactions'
-                        )
-                        fig_amounts.update_xaxes(tickangle=45)
-                        st.plotly_chart(fig_amounts, use_container_width=True)
-            
-            with tab3:
-                if summary_stats['core_team_payments'] > 0:
-                    st.subheader("Core Team vs Non-Core Team Analysis (USD)")
-                    core_breakdown = report_generator.generate_core_team_breakdown(st.session_state.processed_data)
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.dataframe(core_breakdown, use_container_width=True)
-                    with col2:
-                        fig_bar = px.bar(
-                            core_breakdown,
-                            x='Type',
-                            y='Total USD',
-                            title="Core Team vs Non-Core Team Payments (USD)",
-                            color='Type',
-                            text='Number of Payments'
-                        )
-                        st.plotly_chart(fig_bar, use_container_width=True)
-                else:
-                    st.info("No core team members configured. Add core team addresses in the sidebar to see this analysis.")
-            
-            with tab4:
-                if 'Transaction Tag' in st.session_state.processed_data.columns:
-                    st.subheader("Transaction Tags Analysis")
-                    
-                    # Expand tags and analyze
-                    tags_data = []
-                    for _, row in st.session_state.processed_data.iterrows():
-                        tag_value = row['Transaction Tag']
-                        if isinstance(tag_value, str):
-                            tags = tag_value.split(' | ')
-                        else:
-                            tags = [str(tag_value)]
-                        for tag in tags:
-                            tags_data.append({
-                                'Tag': tag,
-                                'USD Value': row['USD Value'],
-                                'Sub-unit': row['Sub-unit']
-                            })
-                    if tags_data:
-                        tags_df = pd.DataFrame(tags_data)
-                        tag_summary = tags_df.groupby('Tag').agg({
-                            'USD Value': ['sum', 'count']
-                        }).round(2)
-                        tag_summary.columns = ['Total USD', 'Count']
-                        tag_summary = tag_summary.reset_index().sort_values('Total USD', ascending=False)
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.dataframe(tag_summary, use_container_width=True)
-                        with col2:
-                            fig_tags = px.bar(
-                                tag_summary.head(10),
-                                x='Tag',
-                                y='Total USD',
-                                title="Top 10 Transaction Tags by USD Value"
+            if HAS_PLOTLY:
+                try:
+                    fig_pie = px.pie(
+                        subunit_summary,
+                        values='Total USD',
+                        names='Sub-unit',
+                        title="Payment Distribution by Sub-unit (USD)"
+                    )
+                    st.plotly_chart(fig_pie, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"Could not render Plotly chart: {e}")
+            else:
+                st.info("Plotly not installed — charts are disabled. Install plotly+kaleido to enable charts.")
+
+        # Enhanced analysis sections
+        tab1, tab2, tab3, tab4 = st.tabs(["💰 Payment Categories", "📊 Amount Ranges", "👥 Core Team Analysis", "🏷️ Transaction Tags"])
+
+        with tab1:
+            st.subheader("Transaction Categories (USD)")
+            category_breakdown = report_generator.generate_category_breakdown(st.session_state.processed_data)
+            if not category_breakdown.empty:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.dataframe(category_breakdown, use_container_width=True)
+                with col2:
+                    if HAS_PLOTLY:
+                        try:
+                            fig_category = px.pie(
+                                category_breakdown,
+                                values='Total USD',
+                                names='Transaction Category',
+                                title="Spending by Transaction Category (USD)"
                             )
-                            fig_tags.update_xaxes(tickangle=45)
-                            st.plotly_chart(fig_tags, use_container_width=True)
+                            st.plotly_chart(fig_category, use_container_width=True)
+                        except Exception as e:
+                            st.warning(f"Could not render Plotly chart: {e}")
+                    else:
+                        st.info("Plotly not installed — charts disabled.")
+
+        with tab2:
+            st.subheader("Amount Range Analysis (USD)")
+            amount_analysis = report_generator.generate_amount_range_analysis(st.session_state.processed_data)
+            if not amount_analysis.empty:
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.dataframe(amount_analysis, use_container_width=True)
+                with col2:
+                    if HAS_PLOTLY:
+                        try:
+                            fig_amounts = px.bar(
+                                amount_analysis,
+                                x='Amount Category',
+                                y='Total USD',
+                                title="Spending by Amount Range (USD)",
+                                text='Number of Transactions'
+                            )
+                            fig_amounts.update_xaxes(tickangle=45)
+                            st.plotly_chart(fig_amounts, use_container_width=True)
+                        except Exception as e:
+                            st.warning(f"Could not render Plotly chart: {e}")
+                    else:
+                        st.info("Plotly not installed — charts disabled.")
+
+        with tab3:
+            if summary_stats['core_team_payments'] > 0:
+                st.subheader("Core Team vs Non-Core Team Analysis (USD)")
+                core_breakdown = report_generator.generate_core_team_breakdown(st.session_state.processed_data)
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.dataframe(core_breakdown, use_container_width=True)
+                with col2:
+                    if HAS_PLOTLY:
+                        try:
+                            fig_bar = px.bar(
+                                core_breakdown,
+                                x='Type',
+                                y='Total USD',
+                                title="Core Team vs Non-Core Team Payments (USD)",
+                                color='Type',
+                                text='Number of Payments'
+                            )
+                            st.plotly_chart(fig_bar, use_container_width=True)
+                        except Exception as e:
+                            st.warning(f"Could not render Plotly chart: {e}")
+                    else:
+                        st.info("Plotly not installed — charts disabled.")
+            else:
+                st.info("No core team members configured. Add core team addresses in the sidebar to see this analysis.")
+
+        with tab4:
+            if 'Transaction Tag' in st.session_state.processed_data.columns:
+                st.subheader("Transaction Tags Analysis")
+
+                # Expand tags and analyze
+                tags_data = []
+                for _, row in st.session_state.processed_data.iterrows():
+                    tag_value = row['Transaction Tag']
+                    if isinstance(tag_value, str):
+                        tags = tag_value.split(' | ')
+                    else:
+                        tags = [str(tag_value)]
+                    for tag in tags:
+                        tags_data.append({
+                            'Tag': tag,
+                            'USD Value': row['USD Value'],
+                            'Sub-unit': row['Sub-unit']
+                        })
+
+                if tags_data:
+                    tags_df = pd.DataFrame(tags_data)
+                    tag_summary = tags_df.groupby('Tag').agg({
+                        'USD Value': ['sum', 'count']
+                    }).round(2)
+                    tag_summary.columns = ['Total USD', 'Count']
+                    tag_summary = tag_summary.reset_index().sort_values('Total USD', ascending=False)
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.dataframe(tag_summary, use_container_width=True)
+                    with col2:
+                        if HAS_PLOTLY:
+                            try:
+                                fig_tags = px.bar(
+                                    tag_summary.head(10),
+                                    x='Tag',
+                                    y='Total USD',
+                                    title="Top 10 Transaction Tags by USD Value"
+                                )
+                                fig_tags.update_xaxes(tickangle=45)
+                                st.plotly_chart(fig_tags, use_container_width=True)
+                            except Exception as e:
+                                st.warning(f"Could not render Plotly chart: {e}")
+                        else:
+                            st.info("Plotly not installed — charts disabled.")
             
             # Detailed transactions table
             st.subheader("Detailed Transactions")
-            
+
             detailed_transactions = report_generator.generate_detailed_report(st.session_state.processed_data, include_zero_usd=st.session_state.include_zero_usd)
-            
+
             if not detailed_transactions.empty:
                 # Add filters
                 col1, col2, col3 = st.columns(3)
-                
+
                 with col1:
                     selected_org_units = st.multiselect(
                         "Filter by Org Unit",
                         options=detailed_transactions['Org Unit'].unique(),
                         default=detailed_transactions['Org Unit'].unique()
                     )
-                
+
                 with col2:
                     if 'Transaction Category' in detailed_transactions.columns:
                         selected_categories = st.multiselect(
@@ -599,7 +637,7 @@ def main():
                         )
                     else:
                         selected_categories = []
-                
+
                 with col3:
                     min_amount = st.number_input(
                         "Minimum Amount",
@@ -607,25 +645,25 @@ def main():
                         value=0.0,
                         step=1.0
                     )
-                
+
                 # Apply filters (use USD Value for amount filtering)
                 filter_conditions = (
                     (detailed_transactions['Org Unit'].isin(selected_org_units)) &
                     (detailed_transactions['USD Value'] >= min_amount)
                 )
-                
+
                 if selected_categories:
                     filter_conditions &= detailed_transactions['Transaction Category'].isin(selected_categories)
-                
+
                 filtered_transactions = detailed_transactions[filter_conditions]
-                
+
                 st.dataframe(filtered_transactions, use_container_width=True)
-                
+
                 # Export functionality
                 st.subheader("Export Options")
-                
+
                 col1, col2 = st.columns(2)
-                
+
                 with col1:
                     csv_data = filtered_transactions.to_csv(index=False)
                     st.download_button(
@@ -634,77 +672,77 @@ def main():
                         file_name=f"dao_accounting_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                         mime="text/csv"
                     )
-                
+
                 with col2:
                     json_data = filtered_transactions.to_json(orient='records', indent=2)
                     if json_data:
-                            st.download_button(
-                                label="📥 Download as JSON",
-                                data=json_data,
-                                file_name=f"dao_accounting_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                                mime="application/json"
-                            )
+                        st.download_button(
+                            label="📥 Download as JSON",
+                            data=json_data,
+                            file_name=f"dao_accounting_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                            mime="application/json"
+                        )
 
                     # PDF export: filtered and full (cleanly separated)
-                    with col2:
-                        # Filtered PDF
-                        if st.button("🖨️ Download PDF (filtered view)"):
-                            try:
-                                pdf_bytes = report_generator.export_to_pdf(
-                                    processed_data=st.session_state.processed_data,
-                                    detailed_df=filtered_transactions,
-                                    title=f"DAO Accounting Report - Filtered {datetime.now().strftime('%Y-%m-%d')}",
-                                    include_zero_usd=st.session_state.include_zero_usd,
-                                    subdaos=list(subunits.keys()) if subunits else None,
-                                    main_dao=st.session_state.main_dao_address or None,
-                                    core_team=core_team_addresses,
-                                    proposals_count=sum([len(v.get('proposals', [])) for v in st.session_state.proposal_data.values()])
+                    # Filtered PDF
+                    if st.button("🖨️ Download PDF (filtered view)"):
+                        try:
+                            pdf_bytes = report_generator.export_to_pdf(
+                                processed_data=st.session_state.processed_data,
+                                detailed_df=filtered_transactions,
+                                title=f"DAO Accounting Report - Filtered {datetime.now().strftime('%Y-%m-%d')}",
+                                include_zero_usd=st.session_state.include_zero_usd,
+                                subdaos=list(subunits.keys()) if subunits else None,
+                                main_dao=st.session_state.main_dao_address or None,
+                                core_team=core_team_addresses,
+                                proposals_count=sum([len(v.get('proposals', [])) for v in st.session_state.proposal_data.values()])
+                            )
+                            if pdf_bytes:
+                                st.download_button(
+                                    label="Download PDF (filtered)",
+                                    data=pdf_bytes,
+                                    file_name=f"dao_accounting_report_filtered_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                                    mime='application/pdf'
                                 )
-                                if pdf_bytes:
-                                    st.download_button(
-                                        label="Download PDF (filtered)",
-                                        data=pdf_bytes,
-                                        file_name=f"dao_accounting_report_filtered_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                                        mime='application/pdf'
-                                    )
-                                else:
-                                    st.warning("No data available to export to PDF (filtered)")
-                            except Exception as e:
-                                st.error(f"PDF export failed: {e}")
+                            else:
+                                st.warning("No data available to export to PDF (filtered)")
+                        except Exception as e:
+                            st.error(f"PDF export failed: {e}")
 
-                        # Full PDF
-                        if st.button("🖨️ Download PDF (full report)"):
-                            try:
-                                # Build the detailed DataFrame according to the user's include_zero_usd setting and pass it to the exporter
-                                detailed_for_pdf = report_generator.generate_detailed_report(
-                                    st.session_state.processed_data,
-                                    include_zero_usd=st.session_state.include_zero_usd
+                    # Full PDF
+                    if st.button("🖨️ Download PDF (full report)"):
+                        try:
+                            # Build the detailed DataFrame according to the user's include_zero_usd setting and pass it to the exporter
+                            detailed_for_pdf = report_generator.generate_detailed_report(
+                                st.session_state.processed_data,
+                                include_zero_usd=st.session_state.include_zero_usd
+                            )
+                            pdf_bytes = report_generator.export_to_pdf(
+                                processed_data=st.session_state.processed_data,
+                                detailed_df=detailed_for_pdf,
+                                title=f"DAO Accounting Report - Full {datetime.now().strftime('%Y-%m-%d')}",
+                                include_zero_usd=st.session_state.include_zero_usd,
+                                subdaos=list(subunits.keys()) if subunits else None,
+                                main_dao=st.session_state.main_dao_address or None,
+                                core_team=core_team_addresses,
+                                proposals_count=sum([len(v.get('proposals', [])) for v in st.session_state.proposal_data.values()])
+                            )
+                            if pdf_bytes:
+                                st.download_button(
+                                    label="Download PDF (full)",
+                                    data=pdf_bytes,
+                                    file_name=f"dao_accounting_report_full_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                                    mime='application/pdf'
                                 )
-                                pdf_bytes = report_generator.export_to_pdf(
-                                    processed_data=st.session_state.processed_data,
-                                    detailed_df=detailed_for_pdf,
-                                    title=f"DAO Accounting Report - Full {datetime.now().strftime('%Y-%m-%d')}",
-                                    include_zero_usd=st.session_state.include_zero_usd,
-                                    subdaos=list(subunits.keys()) if subunits else None,
-                                    main_dao=st.session_state.main_dao_address or None,
-                                    core_team=core_team_addresses,
-                                    proposals_count=sum([len(v.get('proposals', [])) for v in st.session_state.proposal_data.values()])
-                                )
-                                if pdf_bytes:
-                                    st.download_button(
-                                        label="Download PDF (full)",
-                                        data=pdf_bytes,
-                                        file_name=f"dao_accounting_report_full_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                                        mime='application/pdf'
-                                    )
-                                else:
-                                    st.warning("No data available to export to PDF (full)")
-                            except Exception as e:
-                                st.error(f"PDF export failed: {e}")
+                            else:
+                                st.warning("No data available to export to PDF (full)")
+                        except Exception as e:
+                            st.error(f"PDF export failed: {e}")
             else:
                 st.info("No transaction data available to display.")
-        else:
-            st.info("No payment data found in the fetched proposals.")
+
+    else:
+        st.info("No payment data found in the fetched proposals.")
 
 if __name__ == "__main__":
     main()
