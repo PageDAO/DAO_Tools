@@ -1,0 +1,28 @@
+The DaoLedger/ directory originally contained the app, utils, attached_assets, and packaging files.
+During reorganization these files were copied to the repository root and the duplicates were intended to be removed.
+
+If you need any of the original raw files, they are still present under DaoLedger/ and can be restored.
+
+Files present when manifest was created:
+- .github/
+- DaoLedger/
+- Dockerfile
+- Procfile
+- __pycache__/
+- app.py
+- attached_assets/
+- build/
+- debug_run_processor.py
+- full_test_report*.pdf
+- pyproject.toml
+- readme.md
+- requirements.txt
+- runtime.txt
+- utils/
+- uv.lock
+
+What was done:
+- Copied working files to repository root: app.py, utils/, attached_assets/*
+- Created this manifest before deletion of duplicates.
+
+If you want me to permanently remove the DaoLedger/ duplicates, confirm and I will delete them.
